@@ -1,0 +1,54 @@
+diff --git a/recipes/core/drivers/recipe.toml b/recipes/core/drivers/recipe.toml
+index b29a42a2..f651cc40 100644
+--- a/recipes/core/drivers/recipe.toml
++++ b/recipes/core/drivers/recipe.toml
+@@ -1,5 +1,5 @@
+-[source]
+-git = "https://gitlab.redox-os.org/redox-os/drivers.git"
++# [source]
++# git = "https://gitlab.redox-os.org/redox-os/drivers.git"
+ 
+ [build]
+ template = "custom"
+@@ -26,7 +26,7 @@ BINS=(
+ # depending on the target architecture
+ case "${TARGET}" in
+     i686-unknown-redox | x86_64-unknown-redox)
+-        BINS+=(ac97d bgad pcspkrd sb16d vboxd)
++        BINS+=(ac97d bgad pcspkrd sb16d vboxd hyperv)
+         ;;
+     *)
+         ;;
+@@ -41,7 +41,7 @@ export CARGO_PROFILE_RELEASE_PANIC=abort
+     $(for bin in "${BINS[@]}"; do echo "-p" "${bin}"; done)
+ for bin in "${BINS[@]}"
+ do
+-    if [[ "${bin}" == "inputd" || "${bin}" == "pcid" ]]; then
++    if [[ "${bin}" == "inputd" || "${bin}" == "pcid" || "${bin}" == "hyperv" ]]; then
+         cp -v "target/${TARGET}/release/${bin}" "${COOKBOOK_STAGE}/usr/bin"
+     else
+         cp -v "target/${TARGET}/release/${bin}" "${COOKBOOK_STAGE}/usr/lib/drivers"
+diff --git a/recipes/core/kernel/recipe.toml b/recipes/core/kernel/recipe.toml
+index 38b66b43..e687b4d9 100644
+--- a/recipes/core/kernel/recipe.toml
++++ b/recipes/core/kernel/recipe.toml
+@@ -1,5 +1,5 @@
+-[source]
+-git = "https://gitlab.redox-os.org/redox-os/kernel.git"
++#[source]
++#git = "https://gitlab.redox-os.org/redox-os/kernel.git"
+ 
+ [build]
+ template = "custom"
+diff --git a/recipes/core/netstack/recipe.toml b/recipes/core/netstack/recipe.toml
+index c2a534a2..019db023 100644
+--- a/recipes/core/netstack/recipe.toml
++++ b/recipes/core/netstack/recipe.toml
+@@ -1,5 +1,5 @@
+-[source]
+-git = "https://gitlab.redox-os.org/redox-os/netstack.git"
++#[source]
++#git = "https://gitlab.redox-os.org/redox-os/netstack.git"
+ 
+ [build]
+ template = "cargo"

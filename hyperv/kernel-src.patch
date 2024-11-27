@@ -1,0 +1,161 @@
+diff --git a/src/arch/x86_shared/time.rs b/src/arch/x86_shared/time.rs
+index d953a9c..4e791e2 100644
+--- a/src/arch/x86_shared/time.rs
++++ b/src/arch/x86_shared/time.rs
+@@ -1,8 +1,64 @@
+ #[cfg(feature = "acpi")]
+ use super::device::hpet;
+ use super::device::pit;
++use core::ptr;
++use core::arch::asm;
++
++/// reference TSC (Time Stamp Counter) page
++#[repr(C)]
++struct TscReferencePage {
++    tsc_sequence: u32,
++    _reserved1: u32,
++    tsc_scale: u64,
++    tsc_offset: i64,
++    _reserved2: [u8; 509]
++}
++
++fn rdtsc() -> u64 {
++    let low: u32;
++    let high: u32;
++    unsafe {
++        asm!("rdtscp", out("edx") high, out("eax") low, options(nomem, nostack));
++    }
++    low as u64 | (high as u64) << 32
++}
++
++/// Returns time in 100nS units (not real time, e.g. stops when VM is paused/resumed)
++pub(crate) fn hyperv_read_tsc_reference_time() -> Option<u64> {
++    /*let tsc_ptr = crate::scheme::hyperv::TSC_PAGE.load(core::sync::atomic::Ordering::SeqCst);
++    if tsc_ptr == 0 {
++        return None;
++    }
++    let tsc_page = unsafe { 
++        &*(tsc_ptr as *const TscReferencePage)
++    };
++    
++    // TODO seems broken and only looping in this combined impl, maybe sth wrong with the tsc page alloc
++    loop {
++        let start_sequence = unsafe { ptr::read_volatile(&tsc_page.tsc_sequence) };
++        if start_sequence == 0 {
++            return Some(crate::scheme::hyperv::read_msr(crate::scheme::hyperv::HV_X64_MSR_TIME_REF_COUNT));
++        }
++        // crate::memory_barrier(); // TODO read memory barrier
++        let tsc = rdtsc();
++        let scale = unsafe { ptr::read_volatile(&tsc_page.tsc_scale) };
++        let offset = unsafe { ptr::read_volatile(&tsc_page.tsc_offset) };
++        let end_sequence = unsafe { ptr::read_volatile(&tsc_page.tsc_sequence) };
++
++        if start_sequence == end_sequence {
++            let base = ((tsc as u128 * scale as u128) >> 64) as i64;
++            return Some((base + offset) as u64);
++        }
++        // crate::memory_barrier(); // TODO read memory barrier
++    }*/
++    return Some(crate::scheme::hyperv::read_msr(crate::scheme::hyperv::HV_X64_MSR_TIME_REF_COUNT));
++}
+ 
+ pub fn monotonic_absolute() -> u128 {
++    if let Some(ns) = hyperv_read_tsc_reference_time() {
++        return ns as u128 * 100;
++    }
++
+     // The paravirtualized TSC is already guaranteed to be monotonic, and thus doesn't need to be
+     // readjusted.
+     #[cfg(feature = "x86_kvm_pv")]
+diff --git a/src/scheme/irq.rs b/src/scheme/irq.rs
+index af48f6a..b5ceb50 100644
+--- a/src/scheme/irq.rs
++++ b/src/scheme/irq.rs
+@@ -56,6 +56,11 @@ const INO_PHANDLE: u64 = 0x8003_0000_0000_0000;
+ /// Add to the input queue
+ #[no_mangle]
+ pub extern "C" fn irq_trigger(irq: u8) {
++    // WORKAROUND of now hyperv timer IRQ setup
++    // Figure out how this should work... AFAIK hyperv has no PIT so we would need to do those on a similar? interval
++    crate::context::timeout::trigger();
++    crate::context::switch::tick();
++
+     COUNTS.lock()[irq as usize] += 1;
+ 
+     for (fd, _) in HANDLES
+diff --git a/src/scheme/mod.rs b/src/scheme/mod.rs
+index eea6efd..d1fc6c4 100644
+--- a/src/scheme/mod.rs
++++ b/src/scheme/mod.rs
+@@ -34,6 +34,7 @@ use self::dtb::DtbScheme;
+ use self::{
+     debug::DebugScheme, event::EventScheme, irq::IrqScheme, itimer::ITimerScheme,
+     memory::MemoryScheme, pipe::PipeScheme, proc::ProcScheme, root::RootScheme, serio::SerioScheme,
++    hyperv::HypervScheme,
+     sys::SysScheme, time::TimeScheme, user::UserScheme,
+ };
+ 
+@@ -61,6 +62,9 @@ pub mod memory;
+ /// `pipe:` - used internally by the kernel to implement `pipe`
+ pub mod pipe;
+ 
++/// `hyperv:`
++pub mod hyperv;
++
+ /// `proc:` - allows tracing processes and reading/writing their memory
+ pub mod proc;
+ 
+@@ -135,6 +139,7 @@ impl SchemeList {
+                 Debug,
+                 Event,
+                 Memory,
++                Hyperv,
+                 Pipe,
+                 Serio,
+                 Irq,
+@@ -221,6 +226,8 @@ impl SchemeList {
+             .unwrap();
+         self.insert_global(ns, "serio", GlobalSchemes::Serio)
+             .unwrap();
++        self.insert_global(ns, "hyperv", GlobalSchemes::Hyperv)
++            .unwrap();
+     }
+ 
+     pub fn make_ns(
+@@ -541,6 +548,8 @@ pub enum GlobalSchemes {
+ 
+     #[cfg(dtb)]
+     Dtb,
++
++    Hyperv,
+ }
+ pub const MAX_GLOBAL_SCHEMES: usize = 16;
+ 
+@@ -568,6 +577,7 @@ impl core::ops::Deref for GlobalSchemes {
+             Self::Debug => &DebugScheme,
+             Self::Event => &EventScheme,
+             Self::Memory => &MemoryScheme,
++            Self::Hyperv => &HypervScheme,
+             Self::Pipe => &PipeScheme,
+             Self::Serio => &SerioScheme,
+             Self::Irq => &IrqScheme,
+diff --git a/src/scheme/time.rs b/src/scheme/time.rs
+index 55ac9b3..c35cb1e 100644
+--- a/src/scheme/time.rs
++++ b/src/scheme/time.rs
+@@ -75,10 +75,14 @@ impl KernelScheme for TimeScheme {
+                 CLOCK_MONOTONIC => time::monotonic(),
+                 _ => return Err(Error::new(EINVAL)),
+             };
+-            let time = TimeSpec {
++            let mut time = TimeSpec {
+                 tv_sec: (arch_time / time::NANOS_PER_SEC) as i64,
+                 tv_nsec: (arch_time % time::NANOS_PER_SEC) as i32,
+             };
++            // Workaround padding not being zeroed and redox libc assuming int64 insteadof int32 and therefore interpreting padding
++            for i in 12..16 {
++                time[i] = 0;
++            }
+             current_chunk.copy_exactly(&time)?;
+ 
+             bytes_read += mem::size_of::<TimeSpec>();
